@@ -1,4 +1,4 @@
-module github.com/FirPic/GoIpCountryResolver
+module github.com/FirPic/go-ip-country-resolver
 
 go 1.24.0
 

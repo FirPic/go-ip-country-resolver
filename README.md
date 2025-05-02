@@ -1,4 +1,4 @@
-# GoIpCountryResolver
+# Go Ip Country Resolver
 
 GoIpCountryResolver est une bibliothèque Go qui permet de localiser le pays d'origine d'une adresse IP en utilisant une base de données BoltDB. Cette solution est optimisée pour la performance et la consommation mémoire, idéale pour les applications nécessitant une géolocalisation IP légère mais efficace.
 
@@ -15,7 +15,7 @@ GoIpCountryResolver est une bibliothèque Go qui permet de localiser le pays d'o
 ## Installation
 
 ```bash
-go get github.com/FirPic/GoIpCountryResolver
+go get github.com/FirPic/go-ip-country-resolver
 ```
 
 ## Utilisation
