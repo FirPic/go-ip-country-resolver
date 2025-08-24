@@ -1,107 +1,142 @@
 # go-ip-country-resolver
 
-Bibliothèque Go pour résoudre rapidement le pays associé à une adresse IPv4 à partir de fichiers de zones (plages start-end ou CIDR) importés dans BoltDB avec double index (texte + représentation numérique).
+Résolution rapide du pays pour une IPv4 à partir de fichiers `.zone` (plages `start-end` ou CIDR) importés dans BoltDB avec un double index (texte + représentation numérique).  
+API publique simple, prête à intégrer dans un service, une CLI ou un middleware réseau.
 
-## Sommaire
-- Objectifs
-- Fonctionnalités
-- Architecture & Buckets
-- Import & Flux
-- API Publique
-- Exemples
-- Format des fichiers .zone
-- Détails techniques
-- Performances & Optimisations futures
-- Tests
-- Roadmap
-- Licence
+---
 
-## Objectifs
-- Stockage persistant compact des plages IP.
-- Recherche rapide via conversion numérique (uint32) + scan ordonné.
-- Cache mémoire léger.
-- Import par lots résilient (ignore lignes invalides / privées).
+## 1. Installation
 
-## Fonctionnalités
-- Import de répertoires *.zone (exclusion automatique de zz.zone).
-- Support formats: "start-end" ou CIDR.
-- Filtrage plages privées / loopback / link-local.
-- Double index (forme originale + clé numérique 8 octets).
-- Vérification de l’ordre des plages.
-- Extraction de toutes les plages d’un pays.
-- API publique simple (wrappers exportés).
-
-## Architecture & Buckets
-Buckets BoltDB:
-1. ip_ranges : clé = chaîne "start-end" ou CIDR original, valeur = code pays.
-2. ip_ranges_numeric : clé = 8 octets (start(4) big-endian + end(4)), valeur = code pays.
-3. ip_prefix_index : réservé (pré-indexation future).
-
-Structures:
-- DBManager : ouverture, import, upsert, vérif d’index.
-- IPLocator : résolution IP + cache.
-- IPCache : map bornée réinitialisée quand pleine.
-- IPRange : représentation start/end numériques.
-
-## Import & Flux
-Fichier .zone -> lecture ligne à ligne:
-1. Ignore commentaires / vide.
-2. Filtre plages privées.
-3. parseIPRange -> (start,end).
-4. Ajout en batch (1000) -> writeBatch:
-   - ip_ranges (forme texte)
-   - ip_ranges_numeric (clé binaire).
-Lookup: cache -> index numérique ordonné -> fallback scan texte.
-
-## API Publique
-
-Principales fonctions exportées (package ipcountrylocator):
-
-```go
-OpenDatabase(path string, readOnly bool) (*DBManager, error)
-(*DBManager) Close() error
-(*DBManager) ImportDirectory(dir string) (processed, updated int, err error)
-(*DBManager) ImportFile(file string) (processed, updated int, err error)
-(*DBManager) UpsertRange(rangeStr string, start, end uint32, country string) (bool, error)
-(*DBManager) VerifyNumericIndex() (count int, err error)
-
-NewLocator(mgr *DBManager, cacheSize int) *IPLocator
-(*IPLocator) Lookup(ip string) (country string, err error)
-(*IPLocator) Ranges(country string) ([]string, error)
-
-ParseRange(rangeStr string) (startUint32, endUint32, error)
+```bash
+go get github.com/FirPic/go-ip-country-resolver
 ```
 
-Nota:
-- ParseRange aide à dériver start/end si vous ajoutez manuellement une plage.
-- Les codes pays attendus sont ISO 3166-1 alpha-2 (ex: "FR", "US").
+Import:
+```go
+import "github.com/FirPic/go-ip-country-resolver/ipcountrylocator"
+```
 
-## Exemples
+---
 
-### Import d’un répertoire complet et résolution
+## 2. Vue d’ensemble
+
+Pipeline:
+1. Fichiers `CC.zone` (ISO 3166-1 alpha-2) placés dans un répertoire.
+2. Import par lot → stockage:
+   - Bucket `ip_ranges` (clé texte originale).
+   - Bucket `ip_ranges_numeric` (clé binaire 8 octets start|end big-endian).
+3. Lookup:
+   - Cache mémoire (clé IP string).
+   - Scan séquentiel du bucket numérique (tri implicite).
+   - Fallback sur bucket texte (sécurité).
+4. API publique = wrappers stables; logique interne masquée.
+
+---
+
+## 3. Format des fichiers `.zone`
+
+Nom: `FR.zone`, `US.zone`, …  
+Contenu:
+```
+# Commentaires ignorés
+1.0.0.0-1.0.0.255
+8.8.8.0/24
+192.168.0.0/16     # Privé -> ignoré
+```
+
+Règles:
+- Lignes vides / débutant par `#` ou `//` ignorées.
+- Ranges privées / loopback / link-local ignorées (aucune erreur).
+- Formats acceptés: `A.B.C.D-E.F.G.H` ou `CIDR`.
+
+---
+
+## 4. Types principaux (publics)
+
+- DBManager: encapsule la base BoltDB + opérations d’import / maintenance.
+- IPLocator: moteur de résolution + cache.
+- IPRange (interne) non nécessaire à l’API publique.
+- Cache: implémentation simple (reset quand plein).
+
+---
+
+## 5. API Publique (Référence détaillée)
+
+### 5.1 Base / Import
+
+#### OpenDatabase(path string, readOnly bool) (*DBManager, error)
+Ouvre (et crée si besoin) la base:
+- path: chemin du fichier `.db`
+- readOnly = true: interdit création de buckets / écritures
+Erreurs: permissions, lock concurrent, chemin invalide.
+
+#### (m *DBManager) Close() error
+Ferme proprement BoltDB. Toujours appeler avec `defer`.
+
+#### (m *DBManager) ImportDirectory(dir string) (processed, updated int, err error)
+Parcourt `dir`, importe chaque `*.zone` sauf `zz.zone`.
+- processed: lignes publiques valides lues.
+- updated: écritures effectives (nouvelles ou modifiées).
+Continue en cas d’erreurs partielles (log possible côté appelant).
+
+#### (m *DBManager) ImportFile(file string) (processed, updated int, err error)
+Import ciblé d’un seul fichier `.zone`.
+
+#### (m *DBManager) UpsertRange(rangeStr string, start, end uint32, country string) (bool, error)
+Insertion / remplacement manuel d’une plage.
+- Utiliser ParseRange(rangeStr) pour dériver start/end.
+- Retourne true si succès (actuellement toujours true si pas d’erreur).
+
+#### (m *DBManager) VerifyNumericIndex() (count int, err error)
+Parcourt `ip_ranges_numeric`, vérifie l’ordre non décroissant de `start`.
+- count: nombre d’entrées vues.
+- Log interne d’avertissements si désordres.
+
+### 5.2 Résolution
+
+#### NewLocator(mgr *DBManager, cacheSize int) *IPLocator
+Construit un localisateur lié à une base ouverte.
+- cacheSize: taille maxi avant reset intégral du cache.
+
+#### (l *IPLocator) Lookup(ip string) (country string, err error)
+Résout une IPv4 (ex: `"8.8.8.8"`).  
+Chemin: cache → bucket numérique → fallback texte.  
+Erreurs: IP invalide, non trouvée.
+
+#### (l *IPLocator) Ranges(country string) ([]string, error)
+Retourne toutes les chaînes originales (`start-end` ou CIDR) associées au code.
+
+### 5.3 Utilitaires
+
+#### ParseRange(rangeStr string) (start uint32, end uint32, err error)
+Normalise une plage en deux bornes inclusives (uint32).
+- Accepte CIDR ou `start-end`.
+- Erreurs: format invalide, adresses invalides.
+
+---
+
+## 6. Exemples
+
+### 6.1 Import + lookup basique
 ```go
 mgr, err := ipcountrylocator.OpenDatabase("ipcountry.db", false)
-if err != nil { log.Fatal(err) }
+if err != nil { panic(err) }
 defer mgr.Close()
 
 processed, updated, err := mgr.ImportDirectory("./zones")
-if err != nil { log.Fatal(err) }
-log.Printf("Import: %d lignes valides, %d écritures\n", processed, updated)
+if err != nil { panic(err) }
 
-locator := ipcountrylocator.NewLocator(mgr, 5000)
+locator := ipcountrylocator.NewLocator(mgr, 10_000)
 
 country, err := locator.Lookup("8.8.8.8")
 if err != nil {
-    log.Println("IP inconnue:", err)
+    fmt.Println("Non résolu:", err)
 } else {
-    log.Println("Pays:", country)
+    fmt.Println("Pays:", country)
 }
-
-frRanges, _ := locator.Ranges("FR")
-log.Printf("Plages FR: %d\n", len(frRanges))
 ```
 
-### Ajout manuel d’une plage
+### 6.2 Ajout manuel d’une plage
 ```go
 start, end, err := ipcountrylocator.ParseRange("203.0.113.0/24")
 if err != nil { log.Fatal(err) }
@@ -110,56 +145,122 @@ _, err = mgr.UpsertRange("203.0.113.0/24", start, end, "EX")
 if err != nil { log.Fatal(err) }
 ```
 
-### Vérification de l’index numérique
+### 6.3 Vérification de cohérence
 ```go
 count, err := mgr.VerifyNumericIndex()
-if err != nil {
-    log.Fatal(err)
+if err != nil { log.Fatal(err) }
+log.Printf("Index numérique: %d plages", count)
+```
+
+### 6.4 Récupération de toutes les plages d’un pays
+```go
+fr, err := locator.Ranges("FR")
+if err != nil { log.Fatal(err) }
+for _, r := range fr {
+    fmt.Println(r)
 }
-log.Printf("Index numérique contient %d plages\n", count)
 ```
 
-## Format des fichiers .zone
-Nom: CC.zone (CC = code pays ISO 2 lettres).
-Contenu (exemple):
-```
-# Commentaires ignorés
-1.0.0.0-1.0.0.255
-8.8.8.0/24
-192.168.0.0/16         # Privé -> ignoré
-```
-Lignes invalides ou privées: ignorées (non bloquant).
+---
 
-## Détails techniques
-- parseIPRange détecte CIDR vs start-end.
-- CIDR -> calcul end via masque: end = start | ((1<<hostBits)-1).
-- Clé numérique 8 octets triée naturellement par start.
-- encodeUint32BE / decodeUint32BE: big-endian pour cohérence lexicographique.
+## 7. Gestion des erreurs
 
-## Performances & Optimisations futures
-Actuel:
-- Parcours séquentiel des ranges numériques (adapté volume modéré).
-Optimisations possibles:
-- Recherche binaire (dichotomie) sur ip_ranges_numeric.
-- Pré-indexation par préfixes (ip_prefix_index).
-- Fusion de plages contiguës.
-- Support IPv6 (128 bits).
-- Cache LRU réel (actuel = reset simple).
+Catégories:
+- Ouverture DB: permission, verrou concurrent.
+- Parsing: formats invalides de ligne (ignorés pendant import).
+- Lookup: IP invalide / inconnue → erreur explicite.
+- Upsert: erreurs I/O BoltDB (rare).
 
-## Tests
-Exécuter:
+Stratégie import: lignes invalides ignorées silencieusement (compteur `processed` exclut lignes commentées mais inclut lignes privées avant filtrage ? → Non: privées = ignorées + non ajoutées; elles n’incrémentent pas `updated`).
+
+---
+
+## 8. Concurrence
+
+- BoltDB: multiple lecteurs simultanés OK, un seul writer.  
+- Lookup → DB.View (lecture) + cache thread-safe (RWMutex).  
+- Import (écriture) à séparer des flux fortement concurrents de lookup dans un service critique: envisager fenêtre de maintenance ou ré-ouvrir DB dans un processus distinct.
+
+---
+
+## 9. Performance (actuelle)
+
+- Scan linéaire du bucket numérique (O(N)) jusqu’à la plage adéquate.
+- Cache IP direct (map limitée).
+- Batches d’écriture (1000) réduisent la pression sur BoltDB.
+
+Optimisations futures possibles:
+- Recherche binaire (cursor seek + dichotomie sur clé 8 octets).
+- Index préfixe (/16, /24 adaptatif) → bucket `ip_prefix_index`.
+- Fusion automatique de plages contiguës (réduction cardinalité).
+- Compression (delta + varint).
+- IPv6 (128 bits → 16 octets clé).
+
+---
+
+## 10. Bonnes pratiques
+
+- Toujours `defer mgr.Close()`.
+- Exécuter `VerifyNumericIndex()` après gros imports externes.
+- Limiter `cacheSize` selon mémoire (clé+valeur petites).
+- Pré-valider vos fichiers (pas de ranges chevauchées si vous visez cohérence stricte).
+- Versionner votre fichier .db si utilisé en production (backup régulier).
+
+---
+
+## 11. FAQ
+
+Q: Pourquoi les fonctions internes sont en camelCase non exportées ?  
+R: Séparation nette noyau interne / API publique stable (wrappers).
+
+Q: Que faire si une IP n’est pas trouvée ?  
+R: Retour erreur; gérez côté appelant (ex: "XX"/"UNK" par défaut).
+
+Q: Puis-je injecter IPv6 ?  
+R: Non (pour l’instant). Ajout nécessitera un second schéma (16+16 bytes).
+
+Q: Le cache devient-il incohérent après UpsertRange ?  
+R: Oui potentiellement pour les IP déjà résolues; invalidez manuellement en recréant le locator si cohérence stricte nécessaire.
+
+---
+
+## 12. Tests
+
+Lancer:
 ```bash
 go test ./...
 ```
-Couvre: parsing, conversion, inclusion, import fichiers & répertoires, upsert, vérification d’index, cache, lookup.
+Couvre: parsing, encodage, inclusion, import, upsert, cache, lookup, index.
 
-## Roadmap
+---
+
+## 13. Roadmap
+
 - IPv6
-- Index préfixe (/24 ou adaptatif)
+- Index préfixe
 - Recherche binaire
-- Service HTTP + CLI
-- Compression des plages
-- Métriques (hits cache, temps lookup)
+- CLI + service HTTP
+- Fusion / normalisation des plages
+- Métriques (hits cache / durée lookup)
 
-## Licence
-CC BY-NC-SA 4.0 (voir LICENSE).
+---
+
+## 14. Licence
+
+Licence: CC BY-NC-SA 4.0 (adapter selon vos besoins si usage commercial).  
+Ajouter un fichier LICENSE différent si redistribution commerciale planifiée.
+
+---
+
+## 15. Résumé ultra-rapide
+
+```go
+mgr,_ := ipcountrylocator.OpenDatabase("db/ip.db", false)
+defer mgr.Close()
+mgr.ImportDirectory("./zones")
+loc := ipcountrylocator.NewLocator(mgr, 5000)
+country,_ := loc.Lookup("1.0.0.8")
+fmt.Println(country)
+```
+
+Prêt à l’emploi.
