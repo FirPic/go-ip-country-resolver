@@ -173,17 +173,8 @@ Catégories:
 
 Stratégie import: lignes invalides ignorées silencieusement (compteur `processed` exclut lignes commentées mais inclut lignes privées avant filtrage ? → Non: privées = ignorées + non ajoutées; elles n’incrémentent pas `updated`).
 
----
 
-## 8. Concurrence
-
-- BoltDB: multiple lecteurs simultanés OK, un seul writer.  
-- Lookup → DB.View (lecture) + cache thread-safe (RWMutex).  
-- Import (écriture) à séparer des flux fortement concurrents de lookup dans un service critique: envisager fenêtre de maintenance ou ré-ouvrir DB dans un processus distinct.
-
----
-
-## 9. Performance (actuelle)
+## 8. Performance (actuelle)
 
 - Scan linéaire du bucket numérique (O(N)) jusqu’à la plage adéquate.
 - Cache IP direct (map limitée).
@@ -196,35 +187,7 @@ Optimisations futures possibles:
 - Compression (delta + varint).
 - IPv6 (128 bits → 16 octets clé).
 
----
-
-## 10. Bonnes pratiques
-
-- Toujours `defer mgr.Close()`.
-- Exécuter `VerifyNumericIndex()` après gros imports externes.
-- Limiter `cacheSize` selon mémoire (clé+valeur petites).
-- Pré-valider vos fichiers (pas de ranges chevauchées si vous visez cohérence stricte).
-- Versionner votre fichier .db si utilisé en production (backup régulier).
-
----
-
-## 11. FAQ
-
-Q: Pourquoi les fonctions internes sont en camelCase non exportées ?  
-R: Séparation nette noyau interne / API publique stable (wrappers).
-
-Q: Que faire si une IP n’est pas trouvée ?  
-R: Retour erreur; gérez côté appelant (ex: "XX"/"UNK" par défaut).
-
-Q: Puis-je injecter IPv6 ?  
-R: Non (pour l’instant). Ajout nécessitera un second schéma (16+16 bytes).
-
-Q: Le cache devient-il incohérent après UpsertRange ?  
-R: Oui potentiellement pour les IP déjà résolues; invalidez manuellement en recréant le locator si cohérence stricte nécessaire.
-
----
-
-## 12. Tests
+## 9. Tests
 
 Lancer:
 ```bash
@@ -234,33 +197,6 @@ Couvre: parsing, encodage, inclusion, import, upsert, cache, lookup, index.
 
 ---
 
-## 13. Roadmap
+## 10. Licence
 
-- IPv6
-- Index préfixe
-- Recherche binaire
-- CLI + service HTTP
-- Fusion / normalisation des plages
-- Métriques (hits cache / durée lookup)
-
----
-
-## 14. Licence
-
-Licence: CC BY-NC-SA 4.0 (adapter selon vos besoins si usage commercial).  
-Ajouter un fichier LICENSE différent si redistribution commerciale planifiée.
-
----
-
-## 15. Résumé ultra-rapide
-
-```go
-mgr,_ := ipcountrylocator.OpenDatabase("db/ip.db", false)
-defer mgr.Close()
-mgr.ImportDirectory("./zones")
-loc := ipcountrylocator.NewLocator(mgr, 5000)
-country,_ := loc.Lookup("1.0.0.8")
-fmt.Println(country)
-```
-
-Prêt à l’emploi.
+Licence: CC BY-NC-SA 4.0
